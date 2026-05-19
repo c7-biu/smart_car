@@ -16,9 +16,6 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <thread>
-#include <fstream>
-#include <cstdlib>
 
 using namespace cv;
 
@@ -280,174 +277,6 @@ public:
     DriveContext& GetContext() { return ctx_; }
 
 private:
-    const char* ClassNameById(int class_id) const {
-        static const std::array<const char*, CLASS_NUM> kClassNames = {{
-            "Road",
-            "Change_Lanes",
-            "Warning_Sign",
-            "Green_Light",
-            "Red_Light",
-            "Cross_Road",
-            "Turn_Left",
-            "Turn_Right",
-            "Remove_Limit_Speed",
-            "Limit_10_Speed",
-            "People",
-            "Dangerous",
-            "People_disappear"
-        }};
-        if (class_id < 0 || class_id >= CLASS_NUM) {
-            return "";
-        }
-        return kClassNames[class_id];
-    }
-
-    std::string ShellQuote(const std::string& text) const {
-        std::string out = "'";
-        for (size_t i = 0; i < text.size(); ++i) {
-            if (text[i] == '\'') {
-                out += "'\\''";
-            } else {
-                out.push_back(text[i]);
-            }
-        }
-        out += "'";
-        return out;
-    }
-
-    bool FileExists(const std::string& path) const {
-        std::ifstream ifs(path.c_str());
-        return ifs.good();
-    }
-
-    std::string ResolveAudioRootDir() const {
-        const std::vector<std::string> candidate_dirs = {
-            "./mp3/",
-            "./../mp3/",
-            "/home/jd/a/yolo11/mp3/"
-        };
-        for (size_t i = 0; i < candidate_dirs.size(); ++i) {
-            if (FileExists(candidate_dirs[i] + "Turn_Left.mp3")) {
-                return candidate_dirs[i];
-            }
-        }
-        return "./mp3/";
-    }
-
-    void ResolveRoadAudioName() {
-        const std::string lower_name = "road.mp3";
-        const std::string upper_name = "Road.mp3";
-        if (FileExists(audio_root_dir_ + lower_name)) {
-            audio_file_map_[Road] = lower_name;
-        } else if (FileExists(audio_root_dir_ + upper_name)) {
-            audio_file_map_[Road] = upper_name;
-        }
-    }
-
-    void DetectAudioPlayer() {
-        if (std::system("command -v mpg123 >/dev/null 2>&1") == 0) {
-            audio_player_type_ = 1;
-        } else if (std::system("command -v mplayer >/dev/null 2>&1") == 0) {
-            audio_player_type_ = 2;
-        } else if (std::system("command -v ffplay >/dev/null 2>&1") == 0) {
-            audio_player_type_ = 3;
-        } else {
-            audio_player_type_ = 0;
-        }
-    }
-
-    std::string BuildPlayerCommand(const std::string& abs_file_path) const {
-        const std::string qpath = ShellQuote(abs_file_path);
-        if (audio_player_type_ == 1) {
-            return "mpg123 -q " + qpath + " >/dev/null 2>&1";
-        }
-        if (audio_player_type_ == 2) {
-            return "mplayer -really-quiet " + qpath + " >/dev/null 2>&1";
-        }
-        if (audio_player_type_ == 3) {
-            return "ffplay -nodisp -autoexit -loglevel quiet " + qpath + " >/dev/null 2>&1";
-        }
-        return "";
-    }
-
-    void InitAudioSystem() {
-        audio_file_map_.fill("");
-        audio_prev_flags_.fill(false);
-        audio_has_played_.fill(false);
-
-        for (int class_id = 0; class_id < CLASS_NUM; ++class_id) {
-            const std::string class_name = ClassNameById(class_id);
-            if (!class_name.empty() && class_id != People_disappear) {
-                audio_file_map_[class_id] = class_name + ".mp3";
-            }
-        }
-
-        audio_root_dir_ = ResolveAudioRootDir();
-        ResolveRoadAudioName();
-        DetectAudioPlayer();
-
-        if (audio_player_type_ == 0) {
-            std::cout << "[AUDIO] no player found. install mpg123/mplayer/ffplay." << std::endl;
-        } else {
-            std::cout << "[AUDIO] root: " << audio_root_dir_ << std::endl;
-            PlayAudioAsync(Road);
-        }
-    }
-
-    bool CanPlayNow(int class_id, const std::chrono::steady_clock::time_point& now) {
-        if (class_id < 0 || class_id >= CLASS_NUM) {
-            return false;
-        }
-        if (!audio_has_played_[class_id]) {
-            audio_last_play_tp_[class_id] = now;
-            audio_has_played_[class_id] = true;
-            return true;
-        }
-        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - audio_last_play_tp_[class_id]).count();
-        if (elapsed_ms < Config::AUDIO_MIN_INTERVAL_MS) {
-            return false;
-        }
-        audio_last_play_tp_[class_id] = now;
-        return true;
-    }
-
-    void PlayAudioAsync(int class_id) {
-        if (audio_player_type_ == 0 || class_id < 0 || class_id >= CLASS_NUM) {
-            return;
-        }
-
-        const std::string& file_name = audio_file_map_[class_id];
-        if (file_name.empty()) {
-            return;
-        }
-        const std::string path = audio_root_dir_ + file_name;
-        if (!FileExists(path)) {
-            std::cout << "[AUDIO] missing file: " << path << std::endl;
-            return;
-        }
-
-        const std::string cmd = BuildPlayerCommand(path);
-        if (cmd.empty()) {
-            return;
-        }
-        std::thread([cmd]() {
-            const int ret = std::system(cmd.c_str());
-            (void)ret;
-        }).detach();
-    }
-
-    void HandleTrafficAudioEvents() {
-        const auto now = std::chrono::steady_clock::now();
-        for (int class_id = 0; class_id < CLASS_NUM; ++class_id) {
-            const bool flag = ctx_.traffic_flag[class_id];
-            if (flag && !audio_prev_flags_[class_id] && CanPlayNow(class_id, now)) {
-                PlayAudioAsync(class_id);
-            }
-            audio_prev_flags_[class_id] = flag;
-        }
-    }
-
     void Follow_Trajectory_Decision() {
         if (ctx_.traffic_flag[Turn_Left]) {
             trajectory_state_ = TrajectoryState::TURNING_LEFT;
@@ -537,92 +366,6 @@ private:
         }
     }
 
-    void UpdateObstacleTrajectoryState(int img_width) {
-        if (obstacle_cooldown_frames_ > 0) {
-            obstacle_cooldown_frames_--;
-        }
-
-        if (ctx_.traffic_flag[Red_Light] || ctx_.traffic_flag[People]) {
-            obstacle_traj_active_ = false;
-            obstacle_offset_target_px_ = 0.0f;
-        }
-
-        if (!obstacle_traj_active_ &&
-            obstacle_detect_frames_ >= Config::OBSTACLE_TRIGGER_FRAMES &&
-            obstacle_cooldown_frames_ == 0) {
-            obstacle_traj_active_ = true;
-            if (obstacle_offset_sign_ == 0) {
-                obstacle_offset_sign_ = -1;
-            }
-            std::cout << "OBSTACLE DETECTED: APPLY TRAJECTORY OFFSET" << std::endl;
-        }
-
-        if (obstacle_traj_active_) {
-            const float abs_offset = Config::OBSTACLE_OFFSET_PX;
-            const int center = img_width / 2;
-            const int diff = obstacle_center_x_ - center;
-            if (diff > Config::OBSTACLE_DIRECTION_DEADZONE_PX) {
-                obstacle_offset_sign_ = -1; // 锥桶在右，轨迹左偏
-            } else if (diff < -Config::OBSTACLE_DIRECTION_DEADZONE_PX) {
-                obstacle_offset_sign_ = 1;  // 锥桶在左，轨迹右偏
-            } else if (obstacle_offset_sign_ == 0) {
-                obstacle_offset_sign_ = -1;
-            }
-            obstacle_offset_target_px_ = obstacle_offset_sign_ * abs_offset;
-        }
-
-        if (obstacle_traj_active_ && obstacle_miss_frames_ >= Config::OBSTACLE_MISS_FRAMES) {
-            obstacle_traj_active_ = false;
-            obstacle_offset_target_px_ = 0.0f;
-            obstacle_detect_frames_ = 0;
-            obstacle_miss_frames_ = 0;
-            obstacle_center_x_ = -1;
-            obstacle_cooldown_frames_ = Config::OBSTACLE_COOLDOWN_FRAMES;
-            obstacle_offset_sign_ = 0;
-            ctx_.traffic_flag[Dangerous] = false;
-            ctx_.traffic_count[Dangerous] = 0;
-            std::cout << "OBSTACLE CLEARED: TRAJECTORY RECOVER" << std::endl;
-        }
-
-        obstacle_offset_current_px_ += Config::OBSTACLE_OFFSET_ALPHA *
-                                       (obstacle_offset_target_px_ - obstacle_offset_current_px_);
-        if (std::fabs(obstacle_offset_current_px_) < 1.0f && !obstacle_traj_active_) {
-            obstacle_offset_current_px_ = 0.0f;
-        }
-    }
-
-    void ApplyObstacleOffsetToTrajectory(int img_width) {
-        auto& traj = ctx_.trajectory.road_trajectory;
-        if (traj.empty() || std::fabs(obstacle_offset_current_px_) < 1e-3f) {
-            return;
-        }
-
-        const int n = static_cast<int>(traj.size());
-        for (int i = 0; i < n; ++i) {
-            const float s = (n <= 1) ? 0.0f : static_cast<float>(i) / static_cast<float>(n - 1);
-
-            float w = 0.0f;
-            if (s < 0.10f) {
-                w = 0.0f;
-            } else if (s < 0.55f) {
-                w = (s - 0.20f) / 0.35f;
-            } else if (s < 0.80f) {
-                w = 1.0f;
-            } else {
-                w = (1.0f - s) / 0.20f;
-                if (w < 0.0f) {
-                    w = 0.0f;
-                }
-            }
-
-            const float shifted_x = static_cast<float>(traj[i].x) + obstacle_offset_current_px_ * w;
-            const int x_upper = std::max(Config::OBSTACLE_MARGIN_PX, img_width - Config::OBSTACLE_MARGIN_PX);
-            const int clamped_x = std::max(Config::OBSTACLE_MARGIN_PX,
-                                           std::min(static_cast<int>(std::lround(shifted_x)), x_upper));
-            traj[i].x = clamped_x;
-        }
-    }
-
     void LimitSpeed() {
         ctx_.car_state.vx = std::min(ctx_.car_state.vx, Config::MAX_VX*0.65);
         if (ctx_.traffic_flag[Remove_Limit_Speed]) {
@@ -633,117 +376,28 @@ private:
         }
     }
 
-    std::unordered_map<int, TrafficRule> DefaultTrafficRules() const {
-        return {
-            {Turn_Left, {Turn_Left, 1900, 5, true, 50, true, 3000}},
-            {Turn_Right, {Turn_Right, 1900, 5, true, 50, true, 3000}},
-            {Limit_10_Speed, {Limit_10_Speed, 1000, 5, true, 50, false, 6000}},
-            {Remove_Limit_Speed, {Remove_Limit_Speed, 7500, 5, true, 100, false, 0}},
-            {Red_Light, {Red_Light, 1000, 5, true, 50, false, 2000}},
-            {Green_Light, {Green_Light, 1000, 5, true, 50, false, 2000}},
-            {People, {People, 20000, 1, false, 0, true, 0}},
-            {Dangerous, {Dangerous, 1200, 2, false, 0, true, 3500}},
-        };
-    }
+    std::unordered_map<int, TrafficRule> DefaultTrafficRules() const;
+    int ClassIdFromName(const std::string& name) const;
+    bool LoadTrafficRulesFromFile(const std::string& path, std::unordered_map<int, TrafficRule>& out_rules);
+    void InitTrafficRules();
+    
+    //mp3语音播报函数
+    const char* ClassNameById(int class_id) const;
+    std::string ShellQuote(const std::string& text) const;
+    bool FileExists(const std::string& path) const;
+    std::string ResolveAudioRootDir() const;
+    void ResolveRoadAudioName();
+    void DetectAudioPlayer();
+    std::string BuildPlayerCommand(const std::string& abs_file_path) const;
+    void InitAudioSystem();
+    bool CanPlayNow(int class_id, const std::chrono::steady_clock::time_point& now);
+    void PlayAudioAsync(int class_id);
+    void HandleTrafficAudioEvents();
 
-    int ClassIdFromName(const std::string& name) const {
-        static const std::unordered_map<std::string, int> kNameToId = {
-            {"Road", Road},
-            {"Change_Lanes", Change_Lanes},
-            {"Warning_Sign", Warning_Sign},
-            {"Green_Light", Green_Light},
-            {"Red_Light", Red_Light},
-            {"Cross_Road", Cross_Road},
-            {"Turn_Left", Turn_Left},
-            {"Turn_Right", Turn_Right},
-            {"Remove_Limit_Speed", Remove_Limit_Speed},
-            {"Limit_10_Speed", Limit_10_Speed},
-            {"People", People},
-            {"Dangerous", Dangerous}
-        };
-        auto it = kNameToId.find(name);
-        if (it == kNameToId.end()) {
-            return -1;
-        }
-        return it->second;
-    }
+    //避障函数
+    void UpdateObstacleTrajectoryState(int img_width);
+    void ApplyObstacleOffsetToTrajectory(int img_width);
 
-    bool LoadTrafficRulesFromFile(const std::string& path, std::unordered_map<int, TrafficRule>& out_rules) {
-        cv::FileStorage fs(path, cv::FileStorage::READ);
-        if (!fs.isOpened()) {
-            return false;
-        }
-
-        cv::FileNode rules_node = fs["traffic_rules"];
-        if (rules_node.empty() || rules_node.type() != cv::FileNode::SEQ) {
-            return false;
-        }
-
-        std::unordered_map<int, TrafficRule> loaded;
-        for (cv::FileNodeIterator it = rules_node.begin(); it != rules_node.end(); ++it) {
-            cv::FileNode node = *it;
-            if (node.type() != cv::FileNode::MAP) {
-                continue;
-            }
-
-            int class_id = -1;
-            cv::FileNode id_node = node["class_id"];
-            if (!id_node.empty()) {
-                if (id_node.isInt()) {
-                    class_id = static_cast<int>(id_node);
-                } else if (id_node.isString()) {
-                    class_id = ClassIdFromName((std::string)id_node);
-                }
-            }
-            if (class_id < 0 || class_id >= CLASS_NUM) {
-                continue;
-            }
-
-            TrafficRule rule;
-            rule.class_id = class_id;
-            node["min_area"] >> rule.min_area;
-            node["trigger_count"] >> rule.trigger_count;
-            node["need_center_check"] >> rule.need_center_check;
-            node["center_threshold"] >> rule.center_threshold;
-            node["center_inside"] >> rule.center_inside;
-            node["decision_area"] >> rule.decision_area;
-            loaded[class_id] = rule;
-        }
-
-        if (loaded.empty()) {
-            return false;
-        }
-
-        out_rules.swap(loaded);
-        return true;
-    }
-
-    void InitTrafficRules() {
-        traffic_rules_ = DefaultTrafficRules();
-        const std::vector<std::string> candidate_paths = {
-            "./config/traffic_rules.yaml",
-            "./../config/traffic_rules.yaml",
-            "/home/jd/a/yolo11/config/traffic_rules.yaml"
-        };
-
-        for (const auto& path : candidate_paths) {
-            std::unordered_map<int, TrafficRule> loaded_rules;
-            if (LoadTrafficRulesFromFile(path, loaded_rules)) {
-                traffic_rules_.swap(loaded_rules);
-                // YAML 未配置的类别回退到默认规则（例如 Dangerous）
-                const auto defaults = DefaultTrafficRules();
-                for (const auto& kv : defaults) {
-                    if (traffic_rules_.find(kv.first) == traffic_rules_.end()) {
-                        traffic_rules_[kv.first] = kv.second;
-                    }
-                }
-                std::cout << "traffic rules loaded from: " << path << std::endl;
-                return;
-            }
-        }
-
-        std::cout << "traffic rules config not found/invalid, use defaults." << std::endl;
-    }
 private:
     // 模型
     YOLO11_ROAD_SEG segmentor_;

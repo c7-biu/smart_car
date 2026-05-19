@@ -21,15 +21,15 @@ const double a_max = 0.3;  // 最大向心加速度 m/s² a = v*w
 const int trajectory_control = 80;  // 取轨迹的第100个点进行控制，约在车前1.5m处
 
 // ---------------- PD角度环控制器 ----------------
-void PD_Init(PD_Controller* pd, double kp, double kd, double out_min, double out_max, uint32_t dt_ms);
-double constrain_f(double val, double min, double max);
-double PD_Calculate(PD_Controller* pd, double setpoint, double feedback);
-double V_planning(double omega, double V_max);
-void computeSimple(int img_width,CarState& car_vec, const vector<Point>& road_trajectory, PD_Controller& pd_controller,double V_max );
+inline void PD_Init(PD_Controller* pd, double kp, double kd, double out_min, double out_max, uint32_t dt_ms);
+inline double constrain_f(double val, double min, double max);
+inline double PD_Calculate(PD_Controller* pd, double setpoint, double feedback);
+inline double V_planning(double omega, double V_max);
+inline void computeSimple(int img_width,CarState& car_vec, const vector<Point>& road_trajectory, PD_Controller& pd_controller,double V_max );
 
 
 // ---------------- 速度计算 ----------------
-void computeSimple(int img_width,
+inline void computeSimple(int img_width,
                    CarState& car_vec,
                    const vector<Point>& road_trajectory,
                    PD_Controller& pd_controller,
@@ -89,7 +89,7 @@ void computeSimple(int img_width,
 }
 
 // ---------------- 速度规划 ----------------
-double V_planning(double omega, double V_max)
+inline double V_planning(double omega, double V_max)
 {
     double V_safe = (fabs(omega) < 1e-3) ? V_max : a_max / fabs(omega);
     double V = min(V_safe, V_max);
@@ -97,7 +97,7 @@ double V_planning(double omega, double V_max)
     return V;
 }
 
-double PD_Calculate(PD_Controller* pd, double setpoint, double feedback)
+inline double PD_Calculate(PD_Controller* pd, double setpoint, double feedback)
 {
     pd->error = setpoint - feedback;
     double raw_d = (pd->error - pd->last_error) / (pd->dt_ms / 1000.0);
@@ -108,7 +108,7 @@ double PD_Calculate(PD_Controller* pd, double setpoint, double feedback)
     return pd->output;
 }
 
-void PD_Init(PD_Controller* pd, double kp, double kd, 
+inline void PD_Init(PD_Controller* pd, double kp, double kd, 
              double out_min, double out_max, uint32_t dt_ms)
 {
     pd->Kp = kp; pd->Kd = kd;
@@ -117,12 +117,11 @@ void PD_Init(PD_Controller* pd, double kp, double kd,
     pd->dt_ms = dt_ms;
 }
 
-double constrain_f(double val, double min, double max)
+inline double constrain_f(double val, double min, double max)
 {
     if (val < min) return min;
     if (val > max) return max;
     return val;
 }
-
 
 

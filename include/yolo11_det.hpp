@@ -10,7 +10,7 @@
 #include "preprocess.h"
 #include "utils.h"
 
-Logger gLogger_;
+static Logger gLogger_;
 using namespace nvinfer1;
 const int kOutputSize_ = kMaxNumOutputBbox * sizeof(Detection) / sizeof(float) + 1;
 
