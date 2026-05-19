@@ -72,6 +72,7 @@ namespace Config {
     constexpr int OBSTACLE_DIRECTION_DEADZONE_PX = 20; // 中线附近死区（防左右抖动切换）
     constexpr int OBSTACLE_MARGIN_PX = 10;         // 轨迹点贴边保护边距（像素）
     constexpr int AUDIO_MIN_INTERVAL_MS = 1200;    // 同一标志最小播报间隔（毫秒）
+    constexpr int CROSS_ROAD_STOP_MS = 3000;       // 同时识别到两个人行横道后的停车等待时间（毫秒）
 }
 
 /*========================================================
@@ -166,6 +167,7 @@ public:
     void UpdateTrafficSigns(std::vector<Detection>& object_batch, cv::Mat& img) {
         bool people_detected_this_frame = false;
         bool dangerous_detected_this_frame = false;
+        int cross_road_detect_count = 0;
         int dangerous_center_x = -1;
         int dangerous_area = 0;
 
@@ -188,6 +190,8 @@ public:
             if (!valid) 
                 continue;
 
+
+
             ctx_.traffic_count[obj.class_id]++;
             if (ctx_.traffic_count[obj.class_id] > rule.trigger_count && obj.mianji > rule.decision_area) {
                 ctx_.traffic_flag[obj.class_id] = true;
@@ -199,6 +203,9 @@ public:
                     dangerous_area = static_cast<int>(obj.mianji);
                     dangerous_detected_this_frame = true;
                 }
+                if (obj.class_id == Cross_Road) {
+                    cross_road_detect_count++;
+            }
             }
             
         }
@@ -226,6 +233,19 @@ public:
             obstacle_area_ = 0;
             obstacle_detect_frames_ = 0; // 触发按“连续帧”计数
             obstacle_miss_frames_++;
+        }
+
+        // 同一帧同时看到两个人行横道，触发一次停车等待.
+        if (cross_road_detect_count >= 2) {
+            if (!cross_road_double_latched_) {
+                cross_road_double_latched_ = true;
+                cross_road_waiting_ = true;
+                cross_road_timer_.Reset();
+                speed_state_ = SpeedState::STOP;
+                std::cout << "CROSS_ROAD x2 DETECTED: STOP 3s" << std::endl;
+            }
+        } else {
+            cross_road_double_latched_ = false;
         }
     }
     
@@ -346,6 +366,17 @@ private:
     void Stop() {
         ctx_.car_state.vx = 0; 
         ctx_.car_state.vw = 0;
+
+        // 人行横道双目标停车优先处理：固定等待3秒后恢复.
+        if (cross_road_waiting_) {
+            if (cross_road_timer_.Timeout(Config::CROSS_ROAD_STOP_MS)) {
+                cross_road_waiting_ = false;
+                speed_state_ = SpeedState::FOLLOW_LINE;
+                std::cout << "CROSS_ROAD WAIT DONE, RESUME FOLLOW LINE" << std::endl;
+            }
+            return;
+        }
+
         // 红灯优先级更高：必须绿灯才恢复.
         if (ctx_.traffic_flag[Red_Light]) {
             if (ctx_.traffic_flag[Green_Light]) {
@@ -425,6 +456,10 @@ private:
     int obstacle_area_ = 0;
     int obstacle_offset_sign_ = 0; // -1: 左偏, 1: 右偏
     int obstacle_cooldown_frames_ = 0;
+    // 人行横道双目标停车
+    bool cross_road_waiting_ = false;
+    bool cross_road_double_latched_ = false;
+    Timer cross_road_timer_;
     // 播报
     std::array<std::string, CLASS_NUM> audio_file_map_;
     std::array<bool, CLASS_NUM> audio_prev_flags_;
