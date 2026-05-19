@@ -164,7 +164,6 @@ cv::Scalar getColor(int id) {
     }
 }
 
-
 enum Class_Typical {
     road,
     Turn_Road ,
