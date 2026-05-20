@@ -18,7 +18,7 @@ typedef struct {
 struct CarState { double vx; double vw; };
 
 const double a_max = 0.3;  // 最大向心加速度 m/s² a = v*w
-const int trajectory_control = 80;  // 取轨迹的第100个点进行控制，约在车前1.5m处
+const int trajectory_control = 100;  // 取轨迹的第100个点进行控制，约在车前1.5m处
 
 // ---------------- PD角度环控制器 ----------------
 inline void PD_Init(PD_Controller* pd, double kp, double kd, double out_min, double out_max, uint32_t dt_ms);

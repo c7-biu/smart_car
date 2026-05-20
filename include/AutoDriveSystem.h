@@ -13,6 +13,7 @@
 #include <cmath>
 #include <unordered_map>
 #include <array>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -67,12 +68,13 @@ namespace Config {
     constexpr int OBSTACLE_MISS_FRAMES = 12;       // 锥桶连续丢失多少帧后退出避障
     constexpr int OBSTACLE_COOLDOWN_FRAMES = 25;   // 避障完成后的冷却帧数（防重复触发）
     constexpr int OBSTACLE_START_AREA = 3000;      // 锥桶面积超过该阈值后开始轨迹避障
-    constexpr float OBSTACLE_OFFSET_PX = 65.0f;    // 固定轨迹偏移量（像素）
+    constexpr float OBSTACLE_OFFSET_PX = 20.0f;    // 固定轨迹偏移量（像素）
     constexpr float OBSTACLE_OFFSET_ALPHA = 0.4f; // 偏移平滑系数（越大响应越快）
     constexpr int OBSTACLE_DIRECTION_DEADZONE_PX = 20; // 中线附近死区（防左右抖动切换）
     constexpr int OBSTACLE_MARGIN_PX = 10;         // 轨迹点贴边保护边距（像素）
     constexpr int AUDIO_MIN_INTERVAL_MS = 1200;    // 同一标志最小播报间隔（毫秒）
     constexpr int CROSS_ROAD_STOP_MS = 3000;       // 同时识别到两个人行横道后的停车等待时间（毫秒）
+    constexpr int SECOND_TURN_STOP_AREA = 3000;    // 第二次遇见左/右转时触发结束的面积阈值
 }
 
 /*========================================================
@@ -120,7 +122,7 @@ struct DriveContext {
 ========================================================*/
 class AutoDriveSystem {
 public:
-    AutoDriveSystem() : segmentor_("./../enigne/train27.engine") {
+    AutoDriveSystem() : segmentor_("./../enigne/train28.engine") {
         usart_init(115200, "/dev/serial/by-path/platform-3610000.xhci-usb-0:2.3:1.0");           //串口通信初始化
 
         //PD控制器参数：kp, kd, 输出限制在[-max_vw, max_vw], 采样时间10ms
@@ -130,6 +132,11 @@ public:
     }
     cv::Mat road_mask;
     void RunOnce(cv::Mat& img) {
+        if (mission_finish_requested_) {
+            FinalizeMissionAndExit();
+            return;
+        }
+
         /*-----识别道路，轨迹、目标检测，进行寻线,输出轨迹点、边界点--------- -------*/
         std::vector<Detection> object_batch;
         road_mask = segmentor_.YOLO11_ROAD_SEG_LOOP(img, object_batch);
@@ -138,6 +145,10 @@ public:
         extract_trajectory.Extract(road_mask, ctx_.trajectory);
 
         UpdateTrafficSigns(object_batch, img);
+        if (mission_finish_requested_) {
+            FinalizeMissionAndExit();
+            return;
+        }
         HandleTrafficAudioEvents();
         UpdateObstacleTrajectoryState(img.cols);
         ApplyObstacleOffsetToTrajectory(img.cols);
@@ -156,7 +167,12 @@ public:
         Visualize(img);
 
         SetSpeed();
-        bluetooth_send();        
+        bluetooth_send();
+
+        if (mission_finish_requested_) {
+            FinalizeMissionAndExit();
+            return;
+        }
     }
 
     void SetSpeed() {
@@ -172,10 +188,30 @@ public:
         int dangerous_area = 0;
 
         for ( auto& obj : object_batch) {
+            TrafficRule rule{};
+            bool has_rule = false;
             auto it = traffic_rules_.find(obj.class_id);
-            if (it == traffic_rules_.end()) 
+            if (it != traffic_rules_.end()) {
+                rule = it->second;
+                has_rule = true;
+            } else if (obj.class_id == Change_Lanes) {
+                // 变道规则兜底：YAML 未配置时仍可触发.
+                rule = {Change_Lanes, 1200.0f, 2, false, 0, true, 2000};
+                has_rule = true;
+            } else if (obj.class_id == Warning_Sign) {
+                // 注意标识(Attention)规则兜底：不是锥桶(Dangerous).
+                rule = {Warning_Sign, 1000.0f, 2, false, 0, true, 1800};
+                has_rule = true;
+            }
+            if (!has_rule)
                 continue;
-            auto& rule = it->second;
+
+            // 红灯门控：只有在解除限速曾触发后，红灯才允许触发.
+            if (obj.class_id == Red_Light && !remove_limit_seen_) {
+                ctx_.traffic_count[Red_Light] = 0;
+                ctx_.traffic_flag[Red_Light] = false;
+                continue;
+            }
             if (obj.mianji < rule.min_area)
                 continue;
 
@@ -184,19 +220,53 @@ public:
                 cv::Rect r = get_rect(img, obj.bbox);
                 int x_pos = r.x + r.width / 2;
                 int diff = abs(x_pos - Config::IMAGE_CENTER_X);
-                // if(ctx_.traffic_count[Red_Light] > rule.trigger_count) {
                 valid = rule.center_inside ? (diff < rule.center_threshold) : (diff > rule.center_threshold);
             }
             if (!valid) 
                 continue;
 
+            // 已完成一次转弯后，再次遇见左/右转并且面积足够大，触发“停车+结束播报+退出程序”.
+            if (!mission_finish_requested_ &&
+                turn_completed_count_ >= 1 &&
+                (obj.class_id == Turn_Left || obj.class_id == Turn_Right) &&
+                obj.mianji > Config::SECOND_TURN_STOP_AREA) {
+                mission_finish_requested_ = true;
+                mission_finish_trigger_class_ = obj.class_id;
+                mission_finish_trigger_area_ = static_cast<int>(obj.mianji);
+                speed_state_ = SpeedState::STOP;
+                trajectory_state_ = TrajectoryState::NORMAL;
+                ctx_.traffic_flag[Turn_Left] = false;
+                ctx_.traffic_flag[Turn_Right] = false;
+                ctx_.traffic_count[Turn_Left] = 0;
+                ctx_.traffic_count[Turn_Right] = 0;
+                std::cout << "[MISSION] SECOND TURN SIGN DETECTED: class="
+                          << ClassNameById(obj.class_id)
+                          << " area=" << mission_finish_trigger_area_
+                          << " -> STOP + PLAY FINISH + EXIT" << std::endl;
+                break;
+            }
+
 
 
             ctx_.traffic_count[obj.class_id]++;
+            const bool was_flag_on = ctx_.traffic_flag[obj.class_id];
             if (ctx_.traffic_count[obj.class_id] > rule.trigger_count && obj.mianji > rule.decision_area) {
                 ctx_.traffic_flag[obj.class_id] = true;
+                if (obj.class_id == Remove_Limit_Speed) {
+                    remove_limit_seen_ = true;
+                }
+                if (obj.class_id == Change_Lanes) {
+                    // 变道时同时播报 Change_Lanes 与 Warning_Sign.
+                    ctx_.traffic_flag[Warning_Sign] = true;
+                }
                 if (obj.class_id == People)
                     people_detected_this_frame = 1;
+                if (obj.class_id == People && !was_flag_on) {
+                    std::cout << "[TRAFFIC] PEOPLE FLAG ON"
+                              << " area=" << static_cast<int>(obj.mianji)
+                              << " count=" << ctx_.traffic_count[People]
+                              << std::endl;
+                }
                 if (obj.class_id == Dangerous && obj.mianji > Config::OBSTACLE_START_AREA) {
                     cv::Rect r = get_rect(img, obj.bbox);
                     dangerous_center_x = r.x + r.width / 2;
@@ -205,7 +275,7 @@ public:
                 }
                 if (obj.class_id == Cross_Road) {
                     cross_road_detect_count++;
-            }
+                }
             }
             
         }
@@ -221,6 +291,7 @@ public:
                 ctx_.traffic_count[People] = 0;
                 ctx_.isPeopleAppear = false;
                 people_miss_frames_ = 0;
+                std::cout << "[TRAFFIC] PEOPLE FLAG OFF" << std::endl;
             }
         }
 
@@ -325,6 +396,8 @@ private:
         ctx_.traffic_flag[class_id] = false;
         ctx_.traffic_count[class_id] = 0;
         cooldown_ = 200;
+        turn_completed_count_++;
+        std::cout << "[TURN] COMPLETED COUNT = " << turn_completed_count_ << std::endl;
         std::cout << "TURN FINISHED" << std::endl;
     }
 
@@ -398,6 +471,18 @@ private:
     }
 
     void LimitSpeed() {
+        // 限速状态下也要让红灯/行人具备更高优先级，避免错过停车.
+        if (ctx_.traffic_flag[Red_Light]) {
+            speed_state_ = SpeedState::STOP;
+            std::cout << "/*------------Red_Light-----------------------------*/" << std::endl;
+            return;
+        }
+        if (ctx_.traffic_flag[People]) {
+            speed_state_ = SpeedState::STOP;
+            std::cout << "/*------------Appear People! Stop-----------------------------*/" << std::endl;
+            return;
+        }
+
         ctx_.car_state.vx = std::min(ctx_.car_state.vx, Config::MAX_VX*0.65);
         if (ctx_.traffic_flag[Remove_Limit_Speed]) {
             speed_state_ = SpeedState::FOLLOW_LINE;
@@ -423,7 +508,9 @@ private:
     void InitAudioSystem();
     bool CanPlayNow(int class_id, const std::chrono::steady_clock::time_point& now);
     void PlayAudioAsync(int class_id);
+    bool PlayAudioBlockingByName(const std::vector<std::string>& file_names);
     void HandleTrafficAudioEvents();
+    void FinalizeMissionAndExit();
 
     //避障函数
     void UpdateObstacleTrajectoryState(int img_width);
@@ -444,6 +531,8 @@ private:
     Timer turn_timer_;
     // 冷却时间
     int cooldown_ = 0;
+    // 已完成转弯次数（左/右共用）
+    int turn_completed_count_ = 0;
     // 小人消失帧计数（防抖）
     int people_miss_frames_ = 0;
     // 锥桶避障（轨迹偏移）
@@ -456,10 +545,13 @@ private:
     int obstacle_area_ = 0;
     int obstacle_offset_sign_ = 0; // -1: 左偏, 1: 右偏
     int obstacle_cooldown_frames_ = 0;
+    bool obstacle_detect_logged_ = false; // 同一轮障碍仅打印一次 DETECTED
     // 人行横道双目标停车
     bool cross_road_waiting_ = false;
     bool cross_road_double_latched_ = false;
     Timer cross_road_timer_;
+    // 红灯触发门控：必须先触发过一次解除限速.
+    bool remove_limit_seen_ = false;
     // 播报
     std::array<std::string, CLASS_NUM> audio_file_map_;
     std::array<bool, CLASS_NUM> audio_prev_flags_;
@@ -467,5 +559,10 @@ private:
     std::array<bool, CLASS_NUM> audio_has_played_;
     std::string audio_root_dir_ = "./mp3/";
     int audio_player_type_ = 0; // 0:none 1:mpg123 2:mplayer 3:ffplay
+    // 第二次转弯结束流程
+    bool mission_finish_requested_ = false;
+    bool mission_finish_handled_ = false;
+    int mission_finish_trigger_class_ = -1;
+    int mission_finish_trigger_area_ = 0;
 
 };

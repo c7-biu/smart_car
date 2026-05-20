@@ -108,6 +108,37 @@ void AutoDriveSystem::InitAudioSystem() {
 
     audio_root_dir_ = ResolveAudioRootDir();
     ResolveRoadAudioName();
+
+    // 文件名兼容：优先使用新命名，其次回退旧命名.
+    auto resolve_alias = [this](const std::vector<std::string>& names) -> std::string {
+        for (const auto& name : names) {
+            if (FileExists(audio_root_dir_ + name)) {
+                return name;
+            }
+        }
+        return "";
+    };
+
+    const std::string change_lanes_name = resolve_alias({
+        "Change_lanes.mp3",
+        "Change_Lanes.mp3",
+        "change_lanes.mp3"
+    });
+    if (!change_lanes_name.empty()) {
+        audio_file_map_[Change_Lanes] = change_lanes_name;
+    }
+
+    const std::string warning_sign_name = resolve_alias({
+        "WArning_signs.mp3",
+        "Warning_signs.mp3",
+        "Warning_Signs.mp3",
+        "Warning_Sign.mp3",
+        "warning_signs.mp3"
+    });
+    if (!warning_sign_name.empty()) {
+        audio_file_map_[Warning_Sign] = warning_sign_name;
+    }
+
     DetectAudioPlayer();
 
     if (audio_player_type_ == 0) {
@@ -161,6 +192,27 @@ void AutoDriveSystem::PlayAudioAsync(int class_id) {
     }).detach();
 }
 
+bool AutoDriveSystem::PlayAudioBlockingByName(const std::vector<std::string>& file_names) {
+    if (audio_player_type_ == 0) {
+        std::cout << "[AUDIO] no player for blocking play." << std::endl;
+        return false;
+    }
+    for (const auto& name : file_names) {
+        const std::string path = audio_root_dir_ + name;
+        if (!FileExists(path)) {
+            continue;
+        }
+        const std::string cmd = BuildPlayerCommand(path);
+        if (cmd.empty()) {
+            continue;
+        }
+        const int ret = std::system(cmd.c_str());
+        (void)ret;
+        return true;
+    }
+    return false;
+}
+
 void AutoDriveSystem::HandleTrafficAudioEvents() {
     const auto now = std::chrono::steady_clock::now();
     for (int class_id = 0; class_id < CLASS_NUM; ++class_id) {
@@ -170,4 +222,33 @@ void AutoDriveSystem::HandleTrafficAudioEvents() {
         }
         audio_prev_flags_[class_id] = flag;
     }
+}
+
+void AutoDriveSystem::FinalizeMissionAndExit() {
+    if (mission_finish_handled_) {
+        return;
+    }
+    mission_finish_handled_ = true;
+
+    // 立即停车并下发到下位机.
+    ctx_.car_state.vx = 0.0;
+    ctx_.car_state.vw = 0.0;
+    speed_state_ = SpeedState::STOP;
+    send_struct.x_vel_target = 0;
+    send_struct.z_vel_target = 0;
+    bluetooth_send();
+
+    std::cout << "[MISSION] FINISH FLOW START: trigger="
+              << ClassNameById(mission_finish_trigger_class_)
+              << " area=" << mission_finish_trigger_area_
+              << std::endl;
+
+    const bool played = PlayAudioBlockingByName({"finish.mp3", "Finish.mp3"});
+    if (!played) {
+        std::cout << "[MISSION] finish audio not found (finish.mp3 / Finish.mp3)." << std::endl;
+    } else {
+        std::cout << "[MISSION] finish audio played. exit now." << std::endl;
+    }
+
+    std::exit(0);
 }

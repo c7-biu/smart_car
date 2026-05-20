@@ -17,7 +17,10 @@ void AutoDriveSystem::UpdateObstacleTrajectoryState(int img_width) {
         if (obstacle_offset_sign_ == 0) {
             obstacle_offset_sign_ = -1;
         }
-        std::cout << "OBSTACLE DETECTED: APPLY TRAJECTORY OFFSET" << std::endl;
+        if (!obstacle_detect_logged_) {
+            std::cout << "OBSTACLE DETECTED: APPLY TRAJECTORY OFFSET" << std::endl;
+            obstacle_detect_logged_ = true;
+        }
     }
 
     if (obstacle_traj_active_) {
@@ -42,6 +45,7 @@ void AutoDriveSystem::UpdateObstacleTrajectoryState(int img_width) {
         obstacle_center_x_ = -1;
         obstacle_cooldown_frames_ = Config::OBSTACLE_COOLDOWN_FRAMES;
         obstacle_offset_sign_ = 0;
+        obstacle_detect_logged_ = false;
         ctx_.traffic_flag[Dangerous] = false;
         ctx_.traffic_count[Dangerous] = 0;
         std::cout << "OBSTACLE CLEARED: TRAJECTORY RECOVER" << std::endl;

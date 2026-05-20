@@ -2,10 +2,11 @@
 traffic_rules:
   - { class_id: "Turn_Left",          min_area: 1900,  trigger_count: 5, need_center_check: 1, center_threshold: 50,  center_inside: 1, decision_area: 3000 }
   - { class_id: "Turn_Right",         min_area: 1900,  trigger_count: 5, need_center_check: 1, center_threshold: 50,  center_inside: 1, decision_area: 3000 }
-  - { class_id: "Limit_10_Speed",     min_area: 1000,  trigger_count: 5, need_center_check: 1, center_threshold: 50,  center_inside: 0, decision_area: 6000 }
-  - { class_id: "Remove_Limit_Speed", min_area: 7500,  trigger_count: 5, need_center_check: 1, center_threshold: 100, center_inside: 0, decision_area: 0 }
-  - { class_id: "Red_Light",          min_area: 1000,  trigger_count: 5, need_center_check: 1, center_threshold: 50,  center_inside: 0, decision_area: 4000 }
-  - { class_id: "Green_Light",        min_area: 1000,  trigger_count: 5, need_center_check: 1, center_threshold: 50,  center_inside: 0, decision_area: 2000 }
-  - { class_id: "Cross_Road",         min_area: 1200,  trigger_count: 1, need_center_check: 0, center_threshold: 0,   center_inside: 0, decision_area: 1200 }
-  - { class_id: "People",             min_area: 100,  trigger_count: 5, need_center_check: 0, center_threshold: 0,   center_inside: 0, decision_area: 1500} 
+  - { class_id: "Limit_10_Speed",     min_area: 1000,  trigger_count: 3, need_center_check: 1, center_threshold: 50,  center_inside: 0, decision_area: 6000 }
+  - { class_id: "Remove_Limit_Speed", min_area: 6000,  trigger_count: 3, need_center_check: 1, center_threshold: 100, center_inside: 0, decision_area: 6000 }
+  - { class_id: "Red_Light",          min_area: 500,  trigger_count: 2,  need_center_check: 1, center_threshold: 50,  center_inside: 0, decision_area: 1800 }
+  - { class_id: "Green_Light",        min_area: 1000,  trigger_count: 2, need_center_check: 1, center_threshold: 50,  center_inside: 0, decision_area: 1000 }
+  - { class_id: "Cross_Road",         min_area: 2000,  trigger_count: 2, need_center_check: 0, center_threshold: 0,   center_inside: 0, decision_area: 2000 }
+  - { class_id: "People",             min_area: 100,  trigger_count: 2, need_center_check: 0, center_threshold: 0,   center_inside: 0, decision_area: 500} 
+  - { class_id: "Warning_Sign",       min_area: 1000, trigger_count: 2, need_center_check: 0, center_threshold: 0, center_inside: 1, decision_area: 5000 }
   - { class_id: "Dangerous",          min_area: 1200, trigger_count: 2, need_center_check: 0, center_threshold: 0, center_inside: 1, decision_area: 3500 }
