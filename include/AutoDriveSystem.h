@@ -74,7 +74,7 @@ namespace Config {
     constexpr int OBSTACLE_MARGIN_PX = 10;         // 轨迹点贴边保护边距（像素）
     constexpr int AUDIO_MIN_INTERVAL_MS = 1200;    // 同一标志最小播报间隔（毫秒）
     constexpr int CROSS_ROAD_STOP_MS = 3000;       // 同时识别到两个人行横道后的停车等待时间（毫秒）
-    constexpr int SECOND_TURN_STOP_AREA = 3000;    // 第二次遇见左/右转时触发结束的面积阈值
+    constexpr int SECOND_TURN_STOP_AREA = 2800;    // 第二次遇见左/右转时触发结束的面积阈值
 }
 
 /*========================================================
@@ -157,8 +157,22 @@ public:
         //轨迹决策层---左转、右转、角点识别进行左转右转、遇见锥形桶需要进行避障、遇见变道需要播报声音
         TrajectoryDecision();
 
+        // 变道标志触发后，控制点前瞻距离从60切换到100，并保持到比赛结束.
+        if (ctx_.traffic_flag[Change_Lanes]) {
+            if (!trajectory_control_changed_) {
+                trajectory_control_ = 100;
+                trajectory_control_changed_ = true;
+                std::cout << "[CONTROL] trajectory_control switched to 100 (Change_Lanes triggered)." << std::endl;
+            }
+        }
+
         //根据轨迹计算速度
-        computeSimple(img.cols,ctx_.car_state, ctx_.trajectory.road_trajectory, pd_controller_, Config::MAX_VX);
+        computeSimple(img.cols,
+                      ctx_.car_state,
+                      ctx_.trajectory.road_trajectory,
+                      pd_controller_,
+                      Config::MAX_VX,
+                      trajectory_control_);
 
         //速度控制层---此处计算出来速度，但是遇到小人，红灯的时候需要继续停车、如果之后看到绿灯就继续行使、遇见限速标识减速、遇见解除限速需要进行提速，    
         SpeedDecision();
@@ -183,6 +197,8 @@ public:
     void UpdateTrafficSigns(std::vector<Detection>& object_batch, cv::Mat& img) {
         bool people_detected_this_frame = false;
         bool dangerous_detected_this_frame = false;
+        bool red_detected_this_frame = false;
+        bool green_detected_this_frame = false;
         int cross_road_detect_count = 0;
         int dangerous_center_x = -1;
         int dangerous_area = 0;
@@ -225,6 +241,13 @@ public:
             if (!valid) 
                 continue;
 
+            // 绿灯只在“已进入红灯停车”阶段才允许触发，避免绿灯提前残留导致后续红灯被立刻抵消.
+            if (obj.class_id == Green_Light && !ctx_.traffic_flag[Red_Light]) {
+                ctx_.traffic_count[Green_Light] = 0;
+                ctx_.traffic_flag[Green_Light] = false;
+                continue;
+            }
+
             // 已完成一次转弯后，再次遇见左/右转并且面积足够大，触发“停车+结束播报+退出程序”.
             if (!mission_finish_requested_ &&
                 turn_completed_count_ >= 1 &&
@@ -255,9 +278,11 @@ public:
                 if (obj.class_id == Remove_Limit_Speed) {
                     remove_limit_seen_ = true;
                 }
-                if (obj.class_id == Change_Lanes) {
-                    // 变道时同时播报 Change_Lanes 与 Warning_Sign.
-                    ctx_.traffic_flag[Warning_Sign] = true;
+                if (obj.class_id == Red_Light) {
+                    red_detected_this_frame = true;
+                }
+                if (obj.class_id == Green_Light) {
+                    green_detected_this_frame = true;
                 }
                 if (obj.class_id == People)
                     people_detected_this_frame = 1;
@@ -277,7 +302,14 @@ public:
                     cross_road_detect_count++;
                 }
             }
-            
+        }
+
+        // 未处于激活状态时，清空红绿灯计数，防止历史残留影响下一轮触发.
+        if (!ctx_.traffic_flag[Red_Light] && !red_detected_this_frame) {
+            ctx_.traffic_count[Red_Light] = 0;
+        }
+        if (!ctx_.traffic_flag[Green_Light] && !green_detected_this_frame) {
+            ctx_.traffic_count[Green_Light] = 0;
         }
 
         // 小人连续消失 N 帧后恢复行驶，避免偶发漏检导致抖动.
@@ -395,7 +427,7 @@ private:
         trajectory_state_ = TrajectoryState::NORMAL;
         ctx_.traffic_flag[class_id] = false;
         ctx_.traffic_count[class_id] = 0;
-        cooldown_ = 200;
+        cooldown_ = 500;
         turn_completed_count_++;
         std::cout << "[TURN] COMPLETED COUNT = " << turn_completed_count_ << std::endl;
         std::cout << "TURN FINISHED" << std::endl;
@@ -483,7 +515,7 @@ private:
             return;
         }
 
-        ctx_.car_state.vx = std::min(ctx_.car_state.vx, Config::MAX_VX*0.65);
+        ctx_.car_state.vx = std::min(ctx_.car_state.vx, Config::MAX_VX*0.5);
         if (ctx_.traffic_flag[Remove_Limit_Speed]) {
             speed_state_ = SpeedState::FOLLOW_LINE;
             ctx_.traffic_flag[Limit_10_Speed] = false;
@@ -564,5 +596,8 @@ private:
     bool mission_finish_handled_ = false;
     int mission_finish_trigger_class_ = -1;
     int mission_finish_trigger_area_ = 0;
+    // 动态控制点：初始60，变道后切换到100并保持.
+    int trajectory_control_ = 80;
+    bool trajectory_control_changed_ = false;
 
 };
