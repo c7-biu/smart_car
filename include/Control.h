@@ -17,15 +17,19 @@ typedef struct {
 
 struct CarState { double vx; double vw; };
 
-const double a_max = 0.3;  // 最大向心加速度 m/s² a = v*w
-const int trajectory_control = 100;  // 取轨迹的第100个点进行控制，约在车前1.5m处
+const double a_max = 0.35;  // 最大向心加速度 m/s² a = v*w
 
 // ---------------- PD角度环控制器 ----------------
 inline void PD_Init(PD_Controller* pd, double kp, double kd, double out_min, double out_max, uint32_t dt_ms);
 inline double constrain_f(double val, double min, double max);
 inline double PD_Calculate(PD_Controller* pd, double setpoint, double feedback);
 inline double V_planning(double omega, double V_max);
-inline void computeSimple(int img_width,CarState& car_vec, const vector<Point>& road_trajectory, PD_Controller& pd_controller,double V_max );
+inline void computeSimple(int img_width,
+                          CarState& car_vec,
+                          const vector<Point>& road_trajectory,
+                          PD_Controller& pd_controller,
+                          double V_max,
+                          int trajectory_control);
 
 
 // ---------------- 速度计算 ----------------
@@ -33,7 +37,8 @@ inline void computeSimple(int img_width,
                    CarState& car_vec,
                    const vector<Point>& road_trajectory,
                    PD_Controller& pd_controller,
-                   double V_max ) 
+                   double V_max,
+                   int trajectory_control)
 {
     if (road_trajectory.size() == 0) {
         car_vec.vx = 0;
@@ -65,7 +70,7 @@ inline void computeSimple(int img_width,
 
     // ================== ③ 弯道检测（只影响速度，不影响转向）==================
 
-    int far_idx = trajectory_control + 100;
+    int far_idx = trajectory_control + 120;
     if (far_idx >= road_trajectory.size()) {
         far_idx = road_trajectory.size() - 1;
     }
@@ -123,5 +128,3 @@ inline double constrain_f(double val, double min, double max)
     if (val > max) return max;
     return val;
 }
-
-

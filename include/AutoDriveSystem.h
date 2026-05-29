@@ -74,7 +74,9 @@ namespace Config {
     constexpr int OBSTACLE_MARGIN_PX = 10;         // 轨迹点贴边保护边距（像素）
     constexpr int AUDIO_MIN_INTERVAL_MS = 1200;    // 同一标志最小播报间隔（毫秒）
     constexpr int CROSS_ROAD_STOP_MS = 3000;       // 同时识别到两个人行横道后的停车等待时间（毫秒）
+    constexpr int CROSS_ROAD_STOP_AREA = 5000;     // 人行横道面积超过该阈值后触发停车
     constexpr int SECOND_TURN_STOP_AREA = 3000;    // 第二次遇见左/右转时触发结束的面积阈值
+    constexpr int SECOND_TURN_ARM_MISS_FRAMES = 6; // 首次转弯后，转弯牌连续丢失多少帧才允许第二次结束触发
 }
 
 /*========================================================
@@ -126,11 +128,12 @@ public:
         usart_init(115200, "/dev/serial/by-path/platform-3610000.xhci-usb-0:2.3:1.0");           //串口通信初始化
 
         //PD控制器参数：kp, kd, 输出限制在[-max_vw, max_vw], 采样时间10ms
-        PD_Init(&pd_controller_, 0.015, 0.0015, -Config::MAX_VW, Config::MAX_VW, 10);   
+        PD_Init(&pd_controller_, 0.012, 0.0015, -Config::MAX_VW, Config::MAX_VW, 10);   
         InitTrafficRules();
         InitAudioSystem();
     }
     cv::Mat road_mask;
+    void PlayRoadAudioBlocking();
     void RunOnce(cv::Mat& img) {
         if (mission_finish_requested_) {
             FinalizeMissionAndExit();
@@ -157,8 +160,20 @@ public:
         //轨迹决策层---左转、右转、角点识别进行左转右转、遇见锥形桶需要进行避障、遇见变道需要播报声音
         TrajectoryDecision();
 
-        //根据轨迹计算速度
-        computeSimple(img.cols,ctx_.car_state, ctx_.trajectory.road_trajectory, pd_controller_, Config::MAX_VX);
+        // 变道触发后将控制点从 90 切到 100，并保持到比赛结束.
+        if (ctx_.traffic_flag[Change_Lanes] && !trajectory_control_changed_) {
+            trajectory_control_ = 100; // 变道时控制点切得更远一些
+            trajectory_control_changed_ = true;
+            std::cout << "[CONTROL] trajectory_control switched to 100 (Change_Lanes triggered)." << std::endl;
+        }
+
+        // 根据轨迹计算速度
+        computeSimple(img.cols,
+                      ctx_.car_state,
+                      ctx_.trajectory.road_trajectory,
+                      pd_controller_,
+                      Config::MAX_VX,
+                      trajectory_control_);
 
         //速度控制层---此处计算出来速度，但是遇到小人，红灯的时候需要继续停车、如果之后看到绿灯就继续行使、遇见限速标识减速、遇见解除限速需要进行提速，    
         SpeedDecision();
@@ -183,7 +198,8 @@ public:
     void UpdateTrafficSigns(std::vector<Detection>& object_batch, cv::Mat& img) {
         bool people_detected_this_frame = false;
         bool dangerous_detected_this_frame = false;
-        int cross_road_detect_count = 0;
+        bool cross_road_stop_detected_this_frame = false;
+        bool turn_sign_seen_this_frame = false;
         int dangerous_center_x = -1;
         int dangerous_area = 0;
 
@@ -215,21 +231,17 @@ public:
             if (obj.mianji < rule.min_area)
                 continue;
 
-            bool valid = true;
-            if (rule.need_center_check) {
-                cv::Rect r = get_rect(img, obj.bbox);
-                int x_pos = r.x + r.width / 2;
-                int diff = abs(x_pos - Config::IMAGE_CENTER_X);
-                valid = rule.center_inside ? (diff < rule.center_threshold) : (diff > rule.center_threshold);
+            if (obj.class_id == Turn_Left || obj.class_id == Turn_Right) {
+                turn_sign_seen_this_frame = true;
             }
-            if (!valid) 
-                continue;
 
             // 已完成一次转弯后，再次遇见左/右转并且面积足够大，触发“停车+结束播报+退出程序”.
+            // 这里不再依赖中心区域过滤，避免因牌子位置偏移导致无法结束.
             if (!mission_finish_requested_ &&
                 turn_completed_count_ >= 1 &&
+                second_turn_armed_ &&
                 (obj.class_id == Turn_Left || obj.class_id == Turn_Right) &&
-                obj.mianji > Config::SECOND_TURN_STOP_AREA) {
+                obj.mianji >= Config::SECOND_TURN_STOP_AREA) {
                 mission_finish_requested_ = true;
                 mission_finish_trigger_class_ = obj.class_id;
                 mission_finish_trigger_area_ = static_cast<int>(obj.mianji);
@@ -246,6 +258,23 @@ public:
                 break;
             }
 
+            bool valid = true;
+            if (rule.need_center_check) {
+                cv::Rect r = get_rect(img, obj.bbox);
+                int x_pos = r.x + r.width / 2;
+                int diff = abs(x_pos - Config::IMAGE_CENTER_X);
+                valid = rule.center_inside ? (diff < rule.center_threshold) : (diff > rule.center_threshold);
+            }
+            if (!valid) 
+                continue;
+
+            // 人行横道：先完成过一次左/右转后，任意单目标面积达到阈值才触发停车.
+            if (obj.class_id == Cross_Road &&
+                turn_completed_count_ >= 1 &&
+                obj.mianji >= Config::CROSS_ROAD_STOP_AREA) {
+                cross_road_stop_detected_this_frame = true;
+            }
+
 
 
             ctx_.traffic_count[obj.class_id]++;
@@ -254,10 +283,6 @@ public:
                 ctx_.traffic_flag[obj.class_id] = true;
                 if (obj.class_id == Remove_Limit_Speed) {
                     remove_limit_seen_ = true;
-                }
-                if (obj.class_id == Change_Lanes) {
-                    // 变道时同时播报 Change_Lanes 与 Warning_Sign.
-                    ctx_.traffic_flag[Warning_Sign] = true;
                 }
                 if (obj.class_id == People)
                     people_detected_this_frame = 1;
@@ -272,9 +297,6 @@ public:
                     dangerous_center_x = r.x + r.width / 2;
                     dangerous_area = static_cast<int>(obj.mianji);
                     dangerous_detected_this_frame = true;
-                }
-                if (obj.class_id == Cross_Road) {
-                    cross_road_detect_count++;
                 }
             }
             
@@ -306,14 +328,28 @@ public:
             obstacle_miss_frames_++;
         }
 
-        // 同一帧同时看到两个人行横道，触发一次停车等待.
-        if (cross_road_detect_count >= 2) {
+        // 防止同一个转弯牌在首次转弯结束后被当成“第二次”直接触发结束：
+        // 必须先连续若干帧看不到 Turn_Left/Turn_Right，才武装 second_turn_armed_.
+        if (turn_completed_count_ >= 1 && !second_turn_armed_) {
+            if (turn_sign_seen_this_frame) {
+                second_turn_arm_miss_frames_ = 0;
+            } else {
+                second_turn_arm_miss_frames_++;
+                if (second_turn_arm_miss_frames_ >= Config::SECOND_TURN_ARM_MISS_FRAMES) {
+                    second_turn_armed_ = true;
+                    std::cout << "[MISSION] SECOND TURN ARMED" << std::endl;
+                }
+            }
+        }
+
+        // 人行横道触发：任意单目标面积超过阈值即可停车一次.
+        if (cross_road_stop_detected_this_frame) {
             if (!cross_road_double_latched_) {
                 cross_road_double_latched_ = true;
                 cross_road_waiting_ = true;
                 cross_road_timer_.Reset();
                 speed_state_ = SpeedState::STOP;
-                std::cout << "CROSS_ROAD x2 DETECTED: STOP 3s" << std::endl;
+                std::cout << "CROSS_ROAD LARGE AREA DETECTED: STOP 3s" << std::endl;
             }
         } else {
             cross_road_double_latched_ = false;
@@ -506,7 +542,7 @@ private:
     void DetectAudioPlayer();
     std::string BuildPlayerCommand(const std::string& abs_file_path) const;
     void InitAudioSystem();
-    bool CanPlayNow(int class_id, const std::chrono::steady_clock::time_point& now);
+    bool CanPlayNow(int class_id);
     void PlayAudioAsync(int class_id);
     bool PlayAudioBlockingByName(const std::vector<std::string>& file_names);
     void HandleTrafficAudioEvents();
@@ -555,7 +591,6 @@ private:
     // 播报
     std::array<std::string, CLASS_NUM> audio_file_map_;
     std::array<bool, CLASS_NUM> audio_prev_flags_;
-    std::array<std::chrono::steady_clock::time_point, CLASS_NUM> audio_last_play_tp_;
     std::array<bool, CLASS_NUM> audio_has_played_;
     std::string audio_root_dir_ = "./mp3/";
     int audio_player_type_ = 0; // 0:none 1:mpg123 2:mplayer 3:ffplay
@@ -564,5 +599,10 @@ private:
     bool mission_finish_handled_ = false;
     int mission_finish_trigger_class_ = -1;
     int mission_finish_trigger_area_ = 0;
+    bool second_turn_armed_ = false;
+    int second_turn_arm_miss_frames_ = 0;
+    // 控制点动态切换：初始80，触发变道后切到100并保持.
+    int trajectory_control_ = 75;
+    bool trajectory_control_changed_ = false;
 
 };

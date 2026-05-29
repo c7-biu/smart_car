@@ -37,11 +37,18 @@ int main() {
         return 1;
     }
 
+    std::cout << "初始化完成，先暂停3秒..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    std::cout << "开始播报道路语音..." << std::endl;
+    autoDriveSystem.PlayRoadAudioBlocking();
+    std::cout << "道路语音播报结束，进入主循环..." << std::endl;
+
     auto last_fps_time = std::chrono::steady_clock::now();
     int frame_count = 0;
     double fps = 0.0;
     int a = 0;
-    cv::Mat img_clone ;
+    cv::Mat img_clone ;     
+
     while (g_keep_running.load()) {
         img = cap.ResultCamera();
         if (img.empty()) {

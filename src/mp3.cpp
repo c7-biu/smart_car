@@ -129,11 +129,8 @@ void AutoDriveSystem::InitAudioSystem() {
     }
 
     const std::string warning_sign_name = resolve_alias({
-        "WArning_signs.mp3",
-        "Warning_signs.mp3",
-        "Warning_Signs.mp3",
-        "Warning_Sign.mp3",
-        "warning_signs.mp3"
+        "Dangerous.mp3",
+        "dangerous.mp3"
     });
     if (!warning_sign_name.empty()) {
         audio_file_map_[Warning_Sign] = warning_sign_name;
@@ -145,25 +142,31 @@ void AutoDriveSystem::InitAudioSystem() {
         std::cout << "[AUDIO] no player found. install mpg123/mplayer/ffplay." << std::endl;
     } else {
         std::cout << "[AUDIO] root: " << audio_root_dir_ << std::endl;
-        PlayAudioAsync(Road);
     }
 }
 
-bool AutoDriveSystem::CanPlayNow(int class_id, const std::chrono::steady_clock::time_point& now) {
+void AutoDriveSystem::PlayRoadAudioBlocking() {
+    const std::string& mapped = audio_file_map_[Road];
+    std::vector<std::string> candidates;
+    if (!mapped.empty()) {
+        candidates.push_back(mapped);
+    }
+    candidates.push_back("road.mp3");
+    candidates.push_back("Road.mp3");
+    const bool played = PlayAudioBlockingByName(candidates);
+    if (!played) {
+        std::cout << "[AUDIO] road audio not found (road.mp3 / Road.mp3)." << std::endl;
+    }
+}
+
+bool AutoDriveSystem::CanPlayNow(int class_id) {
     if (class_id < 0 || class_id >= CLASS_NUM) {
         return false;
     }
-    if (!audio_has_played_[class_id]) {
-        audio_last_play_tp_[class_id] = now;
-        audio_has_played_[class_id] = true;
-        return true;
-    }
-    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - audio_last_play_tp_[class_id]).count();
-    if (elapsed_ms < Config::AUDIO_MIN_INTERVAL_MS) {
+    if (audio_has_played_[class_id]) {
         return false;
     }
-    audio_last_play_tp_[class_id] = now;
+    audio_has_played_[class_id] = true;
     return true;
 }
 
@@ -214,10 +217,9 @@ bool AutoDriveSystem::PlayAudioBlockingByName(const std::vector<std::string>& fi
 }
 
 void AutoDriveSystem::HandleTrafficAudioEvents() {
-    const auto now = std::chrono::steady_clock::now();
     for (int class_id = 0; class_id < CLASS_NUM; ++class_id) {
         const bool flag = ctx_.traffic_flag[class_id];
-        if (flag && !audio_prev_flags_[class_id] && CanPlayNow(class_id, now)) {
+        if (flag && !audio_prev_flags_[class_id] && CanPlayNow(class_id)) {
             PlayAudioAsync(class_id);
         }
         audio_prev_flags_[class_id] = flag;
